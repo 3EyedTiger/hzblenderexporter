@@ -15,7 +15,7 @@ A Blender addon that packs PBR textures into Horizon Worlds-optimized BR and MEO
 
 1. Download or clone this repository
 2. In Blender, go to `Edit > Preferences > Add-ons`
-3. Click `Install...` and select `vrc_texture_packer.py`
+3. Click `Install...` and select `hz_texture_packer.py`
 4. Enable the addon by checking the box next to "Material: Horizon Worlds Texture Packer"
 
 ## Usage
