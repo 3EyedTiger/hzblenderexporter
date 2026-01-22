@@ -1,3 +1,5 @@
+![https://github.com/3EyedTiger/hzblenderexporter/blob/d8d9c1148e0c7caac3d07fa7eefbd33d477b7acd/icon.png](https://github.com/3EyedTiger/hzblenderexporter/blob/d8d9c1148e0c7caac3d07fa7eefbd33d477b7acd/icon.png)
+
 # Horizon Worlds Texture Packer
 
 A Blender addon that packs PBR textures into Horizon Worlds-optimized BR and MEO formats, validates material names, and exports meshes to FBX.
