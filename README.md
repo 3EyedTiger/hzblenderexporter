@@ -2,7 +2,22 @@
 
 # Horizon Worlds Texture Packer
 
-A Blender addon that packs PBR textures into Horizon Worlds-optimized BR and MEO formats, validates material names, and exports meshes to FBX.
+## About This Addon
+A Blender addon that automates the consolidation of materials into Meta Horizon Worlds-compliant assets, following the Custom Model Import guidelines highlighted in the official Meta documentation.
+
+It natively bakes and packs materials and textures into the required formats—including baking Ambient Occlusion—entirely within Blender. This eliminates the need for expensive external software like Adobe Substance Painter, streamlining your workflow while ensuring valid naming conventions and optimized FBX exports.
+
+## Terms of Service & Usage Guidelines
+By downloading and using this addon, you agree to the following terms. This tool was built to help the community, so let’s keep the ecosystem healthy and free.
+
+1. Integrity & Attribution
+Please do not claim this work as your own. The VR creative community is tight-knit, and maintaining integrity matters. While you are free to use this tool for any personal or commercial project you create, the code and the addon itself remain the intellectual property of the creator.
+
+2. Free Distribution
+This addon is—and always will be—free for everyone. Do not sell, repackage for sale, or put this tool behind a paywall. I maintain the latest version exclusively at the source; please direct others here so they can get the most up-to-date features and bug fixes.
+
+3. Liability & Data Safety
+Always back up your work regularly! While this addon is designed to streamline your workflow, automated scripts can be unpredictable. I cannot be held responsible for any data loss, project corruption, or unintended results caused by software conflicts or incorrect usage. Use this tool at your own risk and be safe.
 
 ## Features
 
@@ -19,6 +34,18 @@ A Blender addon that packs PBR textures into Horizon Worlds-optimized BR and MEO
 2. In Blender, go to `Edit > Preferences > Add-ons`
 3. Click `Install...` and select `hz_texture_packer.py`
 4. Enable the addon by checking the box next to "Material: Horizon Worlds Texture Packer"
+
+## Support the Creator
+If this tool saves you time or helps you build something amazing, I’d love to see you around the community! You can support the project simply by following my channels:
+
+* YouTube: [The3EyedTiger](https://www.youtube.com/@the3eyedtiger)
+* Twitch: [3eyedtigervr](https://www.twitch.tv/3eyedtigervr)
+* TikTok: [@3.eyed.tiger](https://www.tiktok.com/@3.eyed.tiger)
+* Instagram: [3.eyed.tiger](https://www.instagram.com/3.eyed.tiger/)
+* Kick: [3eyedtiger](https://kick.com/3eyedtiger)
+
+## Come say hi in VR!
+You can find me at the White Lotus public instance in Horizon Worlds during operating hours. 👉 [Click here to visit](https://horizon.meta.com/world/10161642822019365/)
 
 ## Usage
 
