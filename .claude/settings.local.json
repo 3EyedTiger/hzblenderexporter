@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(fc:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(git mv vrc_texture_packer.py hz_texture_packer.py)"
     ]
   }
 }
