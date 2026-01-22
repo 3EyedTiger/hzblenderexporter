@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Horizon Worlds Texture Packer",
     "author": "3 Eyed Tiger",
-    "version": (1, 1, 0),
+    "version": (1, 11, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Horizon Tools",
     "description": "Pack PBR textures into Horizon Worlds-optimized BR and MEO format",
@@ -23,9 +23,9 @@ def validate_material_name(name):
     - Only uppercase, lowercase letters and numbers
     - Must not start with a number
     - No spaces or underscores (except for specific suffixes)
-    - Allowed suffixes: _Transparent, _Masked, _MaskedVXM, _VXC, _VXM, _Blend, _Unlit, _UIO
+    - Allowed suffixes: _Transparent, _Masked, _MaskedVXM, _VXC, _VXM, _Blend, _Unlit, _UIO, _Metal
     """
-    ALLOWED_SUFFIXES = ['_Transparent', '_Masked', '_MaskedVXM', '_VXC', '_VXM', '_Blend', '_Unlit', '_UIO']
+    ALLOWED_SUFFIXES = ['_Transparent', '_Masked', '_MaskedVXM', '_VXC', '_VXM', '_Blend', '_Unlit', '_UIO', '_Metal']
 
     # Check if name has an allowed suffix
     base_name = name
@@ -57,7 +57,7 @@ def generate_compliant_name(name, existing_names):
     Generate a compliant material name from an invalid one.
     Preserves allowed suffixes and adds incremental numbers if needed.
     """
-    ALLOWED_SUFFIXES = ['_Transparent', '_Masked', '_MaskedVXM', '_VXC', '_VXM', '_Blend', '_Unlit', '_UIO']
+    ALLOWED_SUFFIXES = ['_Transparent', '_Masked', '_MaskedVXM', '_VXC', '_VXM', '_Blend', '_Unlit', '_UIO', '_Metal']
 
     # Extract suffix if present
     base_name = name
@@ -251,6 +251,16 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         """Process a single material and pack its textures"""
         props = context.scene.hz_texture_packer
 
+        # Check for special material suffixes (special export behaviors)
+        is_metal_material = mat.name.endswith('_Metal')
+        is_blend_material = mat.name.endswith('_Blend')
+        is_transparent_material = mat.name.endswith('_Transparent')
+        is_maskedvxm_material = mat.name.endswith('_MaskedVXM')
+        is_masked_material = mat.name.endswith('_Masked') and not is_maskedvxm_material  # Exclude _MaskedVXM
+        is_vxc_material = mat.name.endswith('_VXC')
+        is_vxm_material = mat.name.endswith('_VXM')
+        is_uio_material = mat.name.endswith('_UIO')
+
         # Find Principled BSDF node
         principled = None
         for node in mat.node_tree.nodes:
@@ -268,11 +278,29 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             'roughness': self.get_texture_from_socket(principled.inputs['Roughness']),
             'metallic': self.get_texture_from_socket(principled.inputs['Metallic']),
             'emission': self.get_texture_from_socket(principled.inputs['Emission Color']),
+            'specular': self.get_texture_from_socket(principled.inputs.get('Specular', principled.inputs.get('Specular IOR Level'))),
             'ao': None  # AO is typically not directly connected to Principled BSDF
         }
 
         # Debug output
         print(f"\nProcessing material: {mat.name}")
+        if is_vxc_material:
+            print(f"  Detected _VXC suffix - pure vertex color material (no texture export needed)")
+            return True  # Successfully processed, but no export needed
+        elif is_metal_material:
+            print(f"  Detected _Metal suffix - will export BR with metallic in alpha")
+        elif is_blend_material:
+            print(f"  Detected _Blend suffix - will export BA with base color RGB and alpha")
+        elif is_transparent_material:
+            print(f"  Detected _Transparent suffix - will export BR and MESA")
+        elif is_vxm_material:
+            print(f"  Detected _VXM suffix - will export BR with base color RGB and roughness alpha (vertex color multiplied in Horizon)")
+        elif is_maskedvxm_material:
+            print(f"  Detected _MaskedVXM suffix - will export BA with base color RGB and alpha (vertex color multiplied in Horizon)")
+        elif is_masked_material:
+            print(f"  Detected _Masked suffix - will export BA with base color RGB and alpha")
+        elif is_uio_material:
+            print(f"  Detected _UIO suffix - will export high-quality BA for UI with base color RGB and alpha")
         for key, tex in textures.items():
             if tex:
                 print(f"  {key}: {tex.name} ({tex.size[0]}x{tex.size[1]})")
@@ -280,55 +308,210 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                 print(f"  {key}: None")
 
         # Try to find AO texture from other nodes (common setup)
-        for node in mat.node_tree.nodes:
-            if node.type == 'TEX_IMAGE' and node.image:
-                img_name = node.image.name.lower()
-                if 'ao' in img_name or 'occlusion' in img_name or 'ambient' in img_name:
-                    textures['ao'] = node.image
-                    print(f"  Found AO texture by name search: {node.image.name}")
-                    break
+        # _Transparent, _Masked, _MaskedVXM, and _UIO materials don't need AO (not in their output formats)
+        # _VXM materials CAN use AO if present (outputs MEO alongside BR)
+        if not is_metal_material and not is_blend_material and not is_transparent_material and not is_masked_material and not is_maskedvxm_material and not is_uio_material:
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image:
+                    img_name = node.image.name.lower()
+                    if 'ao' in img_name or 'occlusion' in img_name or 'ambient' in img_name:
+                        textures['ao'] = node.image
+                        print(f"  Found AO texture by name search: {node.image.name}")
+                        break
 
-        # Auto-bake if enabled
-        if props.auto_bake_ao and not textures['ao']:
-            print(f"  Auto-baking AO for {mat.name}...")
-            textures['ao'] = self.bake_ao(context, mat, props.bake_resolution)
+            # Auto-bake if enabled
+            if props.auto_bake_ao and not textures['ao']:
+                print(f"  Auto-baking AO for {mat.name}...")
+                textures['ao'] = self.bake_ao(context, mat, props.bake_resolution)
 
-        if props.auto_bake_emission and not textures['emission']:
-            print(f"  Auto-baking Emission for {mat.name}...")
-            textures['emission'] = self.bake_emission(context, mat, props.bake_resolution)
-        
+            if props.auto_bake_emission and not textures['emission']:
+                print(f"  Auto-baking Emission for {mat.name}...")
+                textures['emission'] = self.bake_emission(context, mat, props.bake_resolution)
+
         # Determine resolution
         resolution = self.get_resolution(textures, props.default_resolution)
-        
-        # Create packed textures
-        br_image = self.create_br_texture(textures, resolution)
-        meo_image = self.create_meo_texture(textures, resolution)
 
-        # Save images
-        safe_name = self.sanitize_filename(mat.name)
-        br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
-        meo_path = os.path.join(output_dir, f"{safe_name}_MEO.png")
+        # Generate output filename (remove special suffixes from filename)
+        if is_metal_material:
+            # Remove _Metal suffix from output filename
+            base_name = mat.name[:-6]  # Remove "_Metal"
+            safe_name = self.sanitize_filename(base_name)
+        elif is_blend_material:
+            # Remove _Blend suffix from output filename
+            base_name = mat.name[:-6]  # Remove "_Blend"
+            safe_name = self.sanitize_filename(base_name)
+        elif is_transparent_material:
+            # Remove _Transparent suffix from output filename
+            base_name = mat.name[:-12]  # Remove "_Transparent"
+            safe_name = self.sanitize_filename(base_name)
+        elif is_vxm_material:
+            # Remove _VXM suffix from output filename
+            base_name = mat.name[:-4]  # Remove "_VXM"
+            safe_name = self.sanitize_filename(base_name)
+        elif is_maskedvxm_material:
+            # Remove _MaskedVXM suffix from output filename
+            base_name = mat.name[:-10]  # Remove "_MaskedVXM"
+            safe_name = self.sanitize_filename(base_name)
+        elif is_masked_material:
+            # Remove _Masked suffix from output filename
+            base_name = mat.name[:-7]  # Remove "_Masked"
+            safe_name = self.sanitize_filename(base_name)
+        elif is_uio_material:
+            # Remove _UIO suffix from output filename
+            base_name = mat.name[:-4]  # Remove "_UIO"
+            safe_name = self.sanitize_filename(base_name)
+        else:
+            safe_name = self.sanitize_filename(mat.name)
 
-        # Save using Blender's image save
-        br_image.filepath_raw = br_path
-        br_image.file_format = 'PNG'
-        br_image.save()
+        # Handle _Metal material: BR with RGB=BaseColor, A=Metallic
+        if is_metal_material:
+            br_image = self.create_metal_br_texture(textures, resolution)
+            br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
 
-        meo_image.filepath_raw = meo_path
-        meo_image.file_format = 'PNG'
-        meo_image.save()
+            br_image.filepath_raw = br_path
+            br_image.file_format = 'PNG'
+            br_image.save()
 
-        # Clean up temporary images
-        bpy.data.images.remove(br_image)
-        bpy.data.images.remove(meo_image)
+            bpy.data.images.remove(br_image)
+            print(f"Saved {safe_name}_BR.png (Metal material)")
+        # Handle _Blend material: BA with RGB=BaseColor, A=Alpha
+        elif is_blend_material:
+            ba_image = self.create_blend_ba_texture(textures, resolution)
+            ba_path = os.path.join(output_dir, f"{safe_name}_BA.png")
 
-        # Clean up baked images (AO and Emission)
-        for key in ['ao', 'emission']:
-            if textures[key] and textures[key].name.endswith('_baked'):
-                print(f"  Cleaning up baked image: {textures[key].name}")
-                bpy.data.images.remove(textures[key])
+            ba_image.filepath_raw = ba_path
+            ba_image.file_format = 'PNG'
+            ba_image.save()
 
-        print(f"Saved {safe_name}_BR.png and {safe_name}_MEO.png")
+            bpy.data.images.remove(ba_image)
+            print(f"Saved {safe_name}_BA.png (Blend material)")
+        # Handle _Transparent material: BR (RGB=BaseColor, A=Roughness) and MESA (R=Metallic, G=Specular, B=Emission, A=Alpha)
+        elif is_transparent_material:
+            # Create BR texture (standard base color + roughness)
+            br_image = self.create_br_texture(textures, resolution)
+            br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
+
+            br_image.filepath_raw = br_path
+            br_image.file_format = 'PNG'
+            br_image.save()
+
+            bpy.data.images.remove(br_image)
+
+            # Create MESA texture (R=Metallic, G=Specular, B=Emission, A=Alpha)
+            mesa_image = self.create_transparent_mesa_texture(textures, resolution)
+            mesa_path = os.path.join(output_dir, f"{safe_name}_MESA.png")
+
+            mesa_image.filepath_raw = mesa_path
+            mesa_image.file_format = 'PNG'
+            mesa_image.save()
+
+            bpy.data.images.remove(mesa_image)
+            print(f"Saved {safe_name}_BR.png and {safe_name}_MESA.png (Transparent material)")
+        # Handle _VXM material: BR with RGB=BaseColor, A=Roughness (vertex color multiplied in Horizon)
+        # Optionally also export MEO if metallic, emission, or AO data is present
+        elif is_vxm_material:
+            # Always create BR texture
+            br_image = self.create_br_texture(textures, resolution)
+            br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
+
+            br_image.filepath_raw = br_path
+            br_image.file_format = 'PNG'
+            br_image.save()
+
+            bpy.data.images.remove(br_image)
+
+            # Check if we have metallic, emission, or AO data to create MEO
+            has_meo_data = textures['metallic'] or textures['emission'] or textures['ao']
+
+            if has_meo_data:
+                # Create MEO texture (R=Metallic, G=Emission, B=AO)
+                meo_image = self.create_meo_texture(textures, resolution)
+                meo_path = os.path.join(output_dir, f"{safe_name}_MEO.png")
+
+                meo_image.filepath_raw = meo_path
+                meo_image.file_format = 'PNG'
+                meo_image.save()
+
+                bpy.data.images.remove(meo_image)
+
+                # Clean up baked images (AO and Emission)
+                for key in ['ao', 'emission']:
+                    if textures[key] and textures[key].name.endswith('_baked'):
+                        print(f"  Cleaning up baked image: {textures[key].name}")
+                        bpy.data.images.remove(textures[key])
+
+                print(f"Saved {safe_name}_BR.png and {safe_name}_MEO.png (VXM material - vertex color multiplied in Horizon)")
+            else:
+                print(f"Saved {safe_name}_BR.png (VXM material - vertex color multiplied in Horizon)")
+        # Handle _MaskedVXM material: BA with RGB=BaseColor, A=Alpha (same as _Blend, vertex color multiplied in Horizon)
+        elif is_maskedvxm_material:
+            ba_image = self.create_blend_ba_texture(textures, resolution)
+            ba_path = os.path.join(output_dir, f"{safe_name}_BA.png")
+
+            ba_image.filepath_raw = ba_path
+            ba_image.file_format = 'PNG'
+            ba_image.save()
+
+            bpy.data.images.remove(ba_image)
+            print(f"Saved {safe_name}_BA.png (MaskedVXM material - vertex color multiplied in Horizon)")
+        # Handle _Masked material: BA with RGB=BaseColor, A=Alpha (same as _Blend)
+        elif is_masked_material:
+            ba_image = self.create_blend_ba_texture(textures, resolution)
+            ba_path = os.path.join(output_dir, f"{safe_name}_BA.png")
+
+            ba_image.filepath_raw = ba_path
+            ba_image.file_format = 'PNG'
+            ba_image.save()
+
+            bpy.data.images.remove(ba_image)
+            print(f"Saved {safe_name}_BA.png (Masked material)")
+        # Handle _UIO material: BA with RGB=BaseColor, A=Alpha (high-quality UI texture)
+        elif is_uio_material:
+            ba_image = self.create_blend_ba_texture(textures, resolution)
+            ba_path = os.path.join(output_dir, f"{safe_name}_BA.png")
+
+            ba_image.filepath_raw = ba_path
+            ba_image.file_format = 'PNG'
+            ba_image.save()
+
+            bpy.data.images.remove(ba_image)
+            print(f"Saved {safe_name}_BA.png (UIO material - high-quality UI texture)")
+        else:
+            # Standard material: Always create BR, optionally create MEO if metallic/emission/AO present
+            br_image = self.create_br_texture(textures, resolution)
+            br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
+
+            # Save BR texture
+            br_image.filepath_raw = br_path
+            br_image.file_format = 'PNG'
+            br_image.save()
+
+            bpy.data.images.remove(br_image)
+
+            # Check if we have metallic, emission, or AO data to create MEO
+            has_meo_data = textures['metallic'] or textures['emission'] or textures['ao']
+
+            if has_meo_data:
+                # Create MEO texture (R=Metallic, G=Emission, B=AO)
+                meo_image = self.create_meo_texture(textures, resolution)
+                meo_path = os.path.join(output_dir, f"{safe_name}_MEO.png")
+
+                meo_image.filepath_raw = meo_path
+                meo_image.file_format = 'PNG'
+                meo_image.save()
+
+                bpy.data.images.remove(meo_image)
+
+                # Clean up baked images (AO and Emission)
+                for key in ['ao', 'emission']:
+                    if textures[key] and textures[key].name.endswith('_baked'):
+                        print(f"  Cleaning up baked image: {textures[key].name}")
+                        bpy.data.images.remove(textures[key])
+
+                print(f"Saved {safe_name}_BR.png and {safe_name}_MEO.png")
+            else:
+                print(f"Saved {safe_name}_BR.png")
+
         return True
     
     def get_texture_from_socket(self, socket):
@@ -484,7 +667,198 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         # Alpha channel (roughness) will be saved correctly as linear data
 
         return br_image
-    
+
+    def create_metal_br_texture(self, textures, resolution):
+        """Create Metal BR texture: RGB = Base Color, A = Metallic"""
+        width, height = resolution
+
+        # Create a new Blender image for the Metal BR texture
+        br_image = bpy.data.images.new(
+            name="Metal_BR_temp",
+            width=width,
+            height=height,
+            alpha=True
+        )
+
+        # Initialize pixel array (RGBA format)
+        pixels = [1.0] * (width * height * 4)  # Default to white
+
+        # Load base color
+        base_color_data = None
+        if textures['base_color']:
+            base_color_data, channels = self.get_pixel_data(textures['base_color'], resolution)
+
+        # Load metallic
+        metallic_data = None
+        if textures['metallic']:
+            metallic_data, channels = self.get_pixel_data(textures['metallic'], resolution)
+
+        # Fill pixel data
+        for y in range(height):
+            for x in range(width):
+                idx = (y * width + x) * 4
+
+                # Set RGB from base color
+                if base_color_data:
+                    pixels[idx] = base_color_data[idx]          # R
+                    pixels[idx + 1] = base_color_data[idx + 1]  # G
+                    pixels[idx + 2] = base_color_data[idx + 2]  # B
+                else:
+                    pixels[idx] = 1.0
+                    pixels[idx + 1] = 1.0
+                    pixels[idx + 2] = 1.0
+
+                # Set A from metallic (use first channel)
+                if metallic_data:
+                    pixels[idx + 3] = metallic_data[idx]  # Use R channel for metallic
+                else:
+                    pixels[idx + 3] = 1.0  # Full metallic by default
+
+        # Apply pixels to image using foreach_set
+        br_image.pixels.foreach_set(pixels)
+
+        # Update the image to ensure changes are applied
+        br_image.update()
+
+        return br_image
+
+    def create_blend_ba_texture(self, textures, resolution):
+        """Create Blend BA texture: RGB = Base Color, A = Alpha"""
+        width, height = resolution
+
+        # Create a new Blender image for the Blend BA texture
+        ba_image = bpy.data.images.new(
+            name="Blend_BA_temp",
+            width=width,
+            height=height,
+            alpha=True
+        )
+
+        # Initialize pixel array (RGBA format)
+        pixels = [1.0] * (width * height * 4)  # Default to white with full alpha
+
+        # Load base color (which should contain the alpha channel)
+        base_color_data = None
+        base_color_channels = 0
+        if textures['base_color']:
+            base_color_data, base_color_channels = self.get_pixel_data(textures['base_color'], resolution)
+
+        # Fill pixel data
+        for y in range(height):
+            for x in range(width):
+                idx = (y * width + x) * 4
+
+                # Set RGB from base color
+                if base_color_data:
+                    pixels[idx] = base_color_data[idx]          # R
+                    pixels[idx + 1] = base_color_data[idx + 1]  # G
+                    pixels[idx + 2] = base_color_data[idx + 2]  # B
+
+                    # Set A from base color's alpha channel if it exists
+                    if base_color_channels >= 4:
+                        pixels[idx + 3] = base_color_data[idx + 3]  # Alpha from texture
+                    else:
+                        pixels[idx + 3] = 1.0  # Full opacity if no alpha channel
+                else:
+                    pixels[idx] = 1.0
+                    pixels[idx + 1] = 1.0
+                    pixels[idx + 2] = 1.0
+                    pixels[idx + 3] = 1.0
+
+        # Apply pixels to image using foreach_set
+        ba_image.pixels.foreach_set(pixels)
+
+        # Update the image to ensure changes are applied
+        ba_image.update()
+
+        return ba_image
+
+    def create_transparent_mesa_texture(self, textures, resolution):
+        """Create Transparent MESA texture: R = Metallic, G = Specular, B = Emission, A = Alpha"""
+        width, height = resolution
+
+        # Create a new Blender image for the MESA texture
+        mesa_image = bpy.data.images.new(
+            name="Transparent_MESA_temp",
+            width=width,
+            height=height,
+            alpha=True
+        )
+
+        # Initialize pixel array (RGBA format)
+        pixels = [0.0] * (width * height * 4)  # Default to black
+
+        # Load metallic
+        metallic_data = None
+        if textures['metallic']:
+            metallic_data, _ = self.get_pixel_data(textures['metallic'], resolution)
+
+        # Load specular
+        specular_data = None
+        if textures['specular']:
+            specular_data, _ = self.get_pixel_data(textures['specular'], resolution)
+
+        # Load emission
+        emission_data = None
+        if textures['emission']:
+            emission_data, _ = self.get_pixel_data(textures['emission'], resolution)
+
+        # Load base color for alpha channel
+        base_color_data = None
+        base_color_channels = 0
+        if textures['base_color']:
+            base_color_data, base_color_channels = self.get_pixel_data(textures['base_color'], resolution)
+
+        # Debug: Check what data we have
+        print(f"  Debug - metallic_data: {metallic_data is not None}, specular_data: {specular_data is not None}, emission_data: {emission_data is not None}, base_color_channels: {base_color_channels}")
+
+        # Fill pixel data
+        for y in range(height):
+            for x in range(width):
+                idx = (y * width + x) * 4
+
+                # R channel = Metallic (use first channel)
+                if metallic_data:
+                    pixels[idx] = metallic_data[idx]
+                else:
+                    pixels[idx] = 0.0
+
+                # G channel = Specular (use first channel)
+                if specular_data:
+                    pixels[idx + 1] = specular_data[idx]
+                else:
+                    pixels[idx + 1] = 0.5  # Default specular value
+
+                # B channel = Emission (convert RGB to grayscale if needed)
+                if emission_data:
+                    r = emission_data[idx]
+                    g = emission_data[idx + 1]
+                    b = emission_data[idx + 2]
+                    pixels[idx + 2] = (r + g + b) / 3.0
+                else:
+                    pixels[idx + 2] = 0.0
+
+                # A channel = Alpha from base color texture
+                if base_color_data and base_color_channels >= 4:
+                    pixels[idx + 3] = base_color_data[idx + 3]
+                else:
+                    pixels[idx + 3] = 1.0  # Full opacity by default
+
+        # Set colorspace to Non-Color for data textures
+        mesa_image.colorspace_settings.name = 'Non-Color'
+
+        # Apply pixels to image using foreach_set
+        try:
+            mesa_image.pixels.foreach_set(pixels)
+        except Exception as e:
+            print(f"  Error in foreach_set: {e}")
+            mesa_image.pixels[:] = pixels
+
+        # Update the image to ensure changes are applied
+        mesa_image.update()
+
+        return mesa_image
+
     def create_meo_texture(self, textures, resolution):
         """Create MEO texture: R = Metallic, G = Emission, B = AO"""
         width, height = resolution
@@ -759,10 +1133,80 @@ class HZ_PT_TexturePackerPanel(bpy.types.Panel):
 
         layout.separator()
 
+        # Material suffix reference table (collapsible)
         box = layout.box()
-        box.label(text="Output Format:", icon='INFO')
-        box.label(text="BR: RGB=BaseColor, A=Roughness")
-        box.label(text="MEO: R=Metallic, G=Emission, B=AO")
+        col = box.column(align=True)
+
+        # Header with expand/collapse icon
+        row = col.row()
+        icon = 'TRIA_DOWN' if props.show_suffix_table else 'TRIA_RIGHT'
+        row.prop(props, 'show_suffix_table',
+                 text="Material Suffix Reference",
+                 icon=icon,
+                 emboss=False)
+
+        # Show table content when expanded
+        if props.show_suffix_table:
+            col.separator()
+
+            # Table header
+            row = col.row()
+            row.label(text="Material Suffix")
+            row.label(text="Output Files")
+
+            col.separator()
+
+            # Standard materials
+            row = col.row()
+            row.label(text="(none)")
+            row.label(text="Name_BR.png (+ Name_MEO.png)*")
+
+            # _Metal
+            row = col.row()
+            row.label(text="_Metal")
+            row.label(text="Name_BR.png")
+
+            # _Blend
+            row = col.row()
+            row.label(text="_Blend")
+            row.label(text="Name_BA.png")
+
+            # _Transparent
+            row = col.row()
+            row.label(text="_Transparent")
+            row.label(text="Name_BR.png + Name_MESA.png")
+
+            # _VXM
+            row = col.row()
+            row.label(text="_VXM")
+            row.label(text="Name_BR.png (+ Name_MEO.png)*")
+
+            # _MaskedVXM
+            row = col.row()
+            row.label(text="_MaskedVXM")
+            row.label(text="Name_BA.png")
+
+            # _Masked
+            row = col.row()
+            row.label(text="_Masked")
+            row.label(text="Name_BA.png")
+
+            # _VXC
+            row = col.row()
+            row.label(text="_VXC")
+            row.label(text="(no files - vertex color only)")
+
+            # _UIO
+            row = col.row()
+            row.label(text="_UIO")
+            row.label(text="Name_BA.png")
+
+            col.separator()
+
+            # Note about conditional exports
+            note_box = col.box()
+            note_box.scale_y = 0.7
+            note_box.label(text="* MEO exported if metallic/emission/AO present", icon='INFO')
 
         layout.separator()
 
@@ -832,6 +1276,12 @@ class HZ_TexturePackerProperties(bpy.types.PropertyGroup):
             ('4096', '4096', 'Very high quality, slow bake'),
         ],
         default='2048'
+    )
+
+    show_suffix_table: bpy.props.BoolProperty(
+        name="Show Material Suffix Reference",
+        description="Show/hide the material suffix reference table",
+        default=False
     )
 
 
