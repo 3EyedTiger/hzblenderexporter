@@ -180,6 +180,118 @@ class HZ_OT_ValidateMaterialNames(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# ============================================================================
+# Helper Functions (shared by all operators)
+# ============================================================================
+
+def sanitize_filename(name):
+    """Remove invalid characters from filename"""
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        name = name.replace(char, '_')
+    return name
+
+
+def get_texture_from_socket(socket):
+    """Get the image texture connected to a socket, tracing through intermediate nodes"""
+    if not socket.is_linked:
+        return None
+
+    # Trace back through the node chain to find an Image Texture
+    nodes_to_check = [socket.links[0].from_node]
+    visited = set()
+
+    while nodes_to_check:
+        node = nodes_to_check.pop(0)
+
+        if node in visited:
+            continue
+        visited.add(node)
+
+        # Found an image texture node
+        if node.type == 'TEX_IMAGE' and node.image:
+            return node.image
+
+        # For other node types, check their inputs
+        if hasattr(node, 'inputs'):
+            for input_socket in node.inputs:
+                if input_socket.is_linked:
+                    nodes_to_check.append(input_socket.links[0].from_node)
+
+    return None
+
+
+def get_resolution(textures, default_res):
+    """Determine resolution from existing textures or use default"""
+    for tex in textures.values():
+        if tex:
+            return (tex.size[0], tex.size[1])
+    return (default_res, default_res)
+
+
+def get_pixel_data(image, resolution):
+    """Get pixel data from Blender image and resize if needed"""
+    if not image:
+        return None
+
+    # If image needs resizing, create a temporary resized copy
+    width, height = image.size[0], image.size[1]
+    if (width, height) != resolution:
+        # Create a temporary image at target resolution
+        temp_img = bpy.data.images.new(
+            name="temp_resize",
+            width=resolution[0],
+            height=resolution[1],
+            alpha=True
+        )
+
+        # Scale the source image to temp image using Blender's scale
+        temp_img.scale(resolution[0], resolution[1])
+
+        # Copy pixels from source with scaling
+        src_pixels = list(image.pixels)
+        temp_pixels = [0.0] * (resolution[0] * resolution[1] * 4)
+
+        # Simple bilinear interpolation for resizing
+        for y in range(resolution[1]):
+            for x in range(resolution[0]):
+                # Map to source coordinates
+                src_x = (x / resolution[0]) * width
+                src_y = (y / resolution[1]) * height
+
+                # Get integer coordinates
+                x0 = int(src_x)
+                y0 = int(src_y)
+                x1 = min(x0 + 1, width - 1)
+                y1 = min(y0 + 1, height - 1)
+
+                # Get fractional parts
+                fx = src_x - x0
+                fy = src_y - y0
+
+                # Sample 4 pixels for bilinear interpolation
+                for c in range(min(image.channels, 4)):
+                    p00 = src_pixels[(y0 * width + x0) * image.channels + c] if c < image.channels else 1.0
+                    p10 = src_pixels[(y0 * width + x1) * image.channels + c] if c < image.channels else 1.0
+                    p01 = src_pixels[(y1 * width + x0) * image.channels + c] if c < image.channels else 1.0
+                    p11 = src_pixels[(y1 * width + x1) * image.channels + c] if c < image.channels else 1.0
+
+                    # Bilinear interpolation
+                    p0 = p00 * (1 - fx) + p10 * fx
+                    p1 = p01 * (1 - fx) + p11 * fx
+                    value = p0 * (1 - fy) + p1 * fy
+
+                    temp_pixels[(y * resolution[0] + x) * 4 + c] = value
+
+                # Fill alpha if source doesn't have it
+                if image.channels < 4:
+                    temp_pixels[(y * resolution[0] + x) * 4 + 3] = 1.0
+
+        return temp_pixels, 4
+    else:
+        return list(image.pixels), image.channels
+
+
 class HZ_OT_PackTextures(bpy.types.Operator):
     """Bake & Pack Textures and Meshes into importable assets for Meta Horizon Worlds"""
     bl_idname = "hz.pack_textures"
@@ -249,7 +361,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             wm.progress_update(idx)
             print(f"\n[{idx + 1}/{len(materials)}] Processing: {mat.name}")
 
-            success = self.process_material(mat, output_dir, context)
+            success = HZ_OT_PackTextures.process_material(self, mat, output_dir, context)
             if success:
                 processed_count += 1
 
@@ -269,7 +381,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         if selected_meshes:
             # Create a name for the FBX based on selected objects
             if len(selected_meshes) == 1:
-                fbx_name = self.sanitize_filename(selected_meshes[0].name) + ".fbx"
+                fbx_name = sanitize_filename(selected_meshes[0].name) + ".fbx"
             else:
                 # Use the first object's name or a generic name
                 fbx_name = "exported_meshes.fbx"
@@ -297,7 +409,8 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         return {'FINISHED'}
     
-    def process_material(self, mat, output_dir, context):
+    @staticmethod
+    def process_material(operator, mat, output_dir, context):
         """Process a single material and pack its textures"""
         props = context.scene.hz_texture_packer
 
@@ -333,11 +446,11 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             print(f"  ⚠ No Principled BSDF found - will bake custom shader to texture")
 
             # Bake the material's appearance
-            baked_texture = self.bake_material_combined(context, mat, props.default_resolution)
+            baked_texture = HZ_OT_PackTextures.bake_material_combined(context, mat, props.default_resolution)
 
             if not baked_texture:
                 print(f"  ✗ Skipped: Could not bake custom shader")
-                self.report({'WARNING'}, f"Material '{mat.name}' has no Principled BSDF and baking failed")
+                operator.report({'WARNING'}, f"Material '{mat.name}' has no Principled BSDF and baking failed")
                 return False
 
             # Use the baked texture as base color for export
@@ -347,10 +460,10 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             # For custom shaders, we'll export a simple BR texture with white roughness
             # since we don't have access to proper PBR channels
             resolution = (baked_texture.size[0], baked_texture.size[1])
-            safe_name = self.sanitize_filename(mat.name)
+            safe_name = sanitize_filename(mat.name)
 
             # Create BR texture with baked base color and white roughness
-            br_image = self.create_br_texture(textures, resolution)
+            br_image = HZ_OT_PackTextures.create_br_texture(textures, resolution)
             br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
 
             br_image.filepath_raw = br_path
@@ -365,11 +478,11 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             return True
 
         # Extract texture paths from Principled BSDF
-        textures['base_color'] = self.get_texture_from_socket(principled.inputs['Base Color'])
-        textures['roughness'] = self.get_texture_from_socket(principled.inputs['Roughness'])
-        textures['metallic'] = self.get_texture_from_socket(principled.inputs['Metallic'])
-        textures['emission'] = self.get_texture_from_socket(principled.inputs['Emission Color'])
-        textures['specular'] = self.get_texture_from_socket(principled.inputs.get('Specular', principled.inputs.get('Specular IOR Level')))
+        textures['base_color'] = get_texture_from_socket(principled.inputs['Base Color'])
+        textures['roughness'] = get_texture_from_socket(principled.inputs['Roughness'])
+        textures['metallic'] = get_texture_from_socket(principled.inputs['Metallic'])
+        textures['emission'] = get_texture_from_socket(principled.inputs['Emission Color'])
+        textures['specular'] = get_texture_from_socket(principled.inputs.get('Specular', principled.inputs.get('Specular IOR Level')))
         # textures['ao'] remains None - AO is typically not directly connected to Principled BSDF
 
         # Debug output
@@ -416,54 +529,54 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             # Auto-bake if enabled
             if props.auto_bake_ao and not textures['ao']:
                 print(f"  ⏳ Auto-baking AO (this may take a moment)...")
-                textures['ao'] = self.bake_ao(context, mat, props.bake_resolution)
+                textures['ao'] = HZ_OT_PackTextures.bake_ao(context, mat, props.bake_resolution)
                 if textures['ao']:
                     print(f"  ✓ AO bake complete")
 
             if props.auto_bake_emission and not textures['emission']:
                 print(f"  ⏳ Auto-baking Emission (this may take a moment)...")
-                textures['emission'] = self.bake_emission(context, mat, props.bake_resolution)
+                textures['emission'] = HZ_OT_PackTextures.bake_emission(context, mat, props.bake_resolution)
                 if textures['emission']:
                     print(f"  ✓ Emission bake complete")
 
         # Determine resolution
-        resolution = self.get_resolution(textures, props.default_resolution)
+        resolution = get_resolution(textures, props.default_resolution)
 
         # Generate output filename (remove special suffixes from filename)
         if is_metal_material:
             # Remove _Metal suffix from output filename
             base_name = mat.name[:-6]  # Remove "_Metal"
-            safe_name = self.sanitize_filename(base_name)
+            safe_name = sanitize_filename(base_name)
         elif is_blend_material:
             # Remove _Blend suffix from output filename
             base_name = mat.name[:-6]  # Remove "_Blend"
-            safe_name = self.sanitize_filename(base_name)
+            safe_name = sanitize_filename(base_name)
         elif is_transparent_material:
             # Remove _Transparent suffix from output filename
             base_name = mat.name[:-12]  # Remove "_Transparent"
-            safe_name = self.sanitize_filename(base_name)
+            safe_name = sanitize_filename(base_name)
         elif is_vxm_material:
             # Remove _VXM suffix from output filename
             base_name = mat.name[:-4]  # Remove "_VXM"
-            safe_name = self.sanitize_filename(base_name)
+            safe_name = sanitize_filename(base_name)
         elif is_maskedvxm_material:
             # Remove _MaskedVXM suffix from output filename
             base_name = mat.name[:-10]  # Remove "_MaskedVXM"
-            safe_name = self.sanitize_filename(base_name)
+            safe_name = sanitize_filename(base_name)
         elif is_masked_material:
             # Remove _Masked suffix from output filename
             base_name = mat.name[:-7]  # Remove "_Masked"
-            safe_name = self.sanitize_filename(base_name)
+            safe_name = sanitize_filename(base_name)
         elif is_uio_material:
             # Remove _UIO suffix from output filename
             base_name = mat.name[:-4]  # Remove "_UIO"
-            safe_name = self.sanitize_filename(base_name)
+            safe_name = sanitize_filename(base_name)
         else:
-            safe_name = self.sanitize_filename(mat.name)
+            safe_name = sanitize_filename(mat.name)
 
         # Handle _Metal material: BR with RGB=BaseColor, A=Metallic
         if is_metal_material:
-            br_image = self.create_metal_br_texture(textures, resolution)
+            br_image = HZ_OT_PackTextures.create_metal_br_texture(textures, resolution)
             br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
 
             br_image.filepath_raw = br_path
@@ -474,7 +587,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             print(f"  ✓ Saved: {safe_name}_BR.png (Metal material)")
         # Handle _Blend material: BA with RGB=BaseColor, A=Alpha
         elif is_blend_material:
-            ba_image = self.create_blend_ba_texture(textures, resolution)
+            ba_image = HZ_OT_PackTextures.create_blend_ba_texture(textures, resolution)
             ba_path = os.path.join(output_dir, f"{safe_name}_BA.png")
 
             ba_image.filepath_raw = ba_path
@@ -486,7 +599,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         # Handle _Transparent material: BR (RGB=BaseColor, A=Roughness) and MESA (R=Metallic, G=Specular, B=Emission, A=Alpha)
         elif is_transparent_material:
             # Create BR texture (standard base color + roughness)
-            br_image = self.create_br_texture(textures, resolution)
+            br_image = HZ_OT_PackTextures.create_br_texture(textures, resolution)
             br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
 
             br_image.filepath_raw = br_path
@@ -496,7 +609,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             bpy.data.images.remove(br_image)
 
             # Create MESA texture (R=Metallic, G=Specular, B=Emission, A=Alpha)
-            mesa_image = self.create_transparent_mesa_texture(textures, resolution)
+            mesa_image = HZ_OT_PackTextures.create_transparent_mesa_texture(textures, resolution)
             mesa_path = os.path.join(output_dir, f"{safe_name}_MESA.png")
 
             mesa_image.filepath_raw = mesa_path
@@ -509,7 +622,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         # Optionally also export MEO if metallic, emission, or AO data is present
         elif is_vxm_material:
             # Always create BR texture
-            br_image = self.create_br_texture(textures, resolution)
+            br_image = HZ_OT_PackTextures.create_br_texture(textures, resolution)
             br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
 
             br_image.filepath_raw = br_path
@@ -523,7 +636,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
             if has_meo_data:
                 # Create MEO texture (R=Metallic, G=Emission, B=AO)
-                meo_image = self.create_meo_texture(textures, resolution)
+                meo_image = HZ_OT_PackTextures.create_meo_texture(textures, resolution)
                 meo_path = os.path.join(output_dir, f"{safe_name}_MEO.png")
 
                 meo_image.filepath_raw = meo_path
@@ -543,7 +656,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                 print(f"  ✓ Saved: {safe_name}_BR.png (VXM material)")
         # Handle _MaskedVXM material: BA with RGB=BaseColor, A=Alpha (same as _Blend, vertex color multiplied in Horizon)
         elif is_maskedvxm_material:
-            ba_image = self.create_blend_ba_texture(textures, resolution)
+            ba_image = HZ_OT_PackTextures.create_blend_ba_texture(textures, resolution)
             ba_path = os.path.join(output_dir, f"{safe_name}_BA.png")
 
             ba_image.filepath_raw = ba_path
@@ -554,7 +667,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             print(f"  ✓ Saved: {safe_name}_BA.png (MaskedVXM material)")
         # Handle _Masked material: BA with RGB=BaseColor, A=Alpha (same as _Blend)
         elif is_masked_material:
-            ba_image = self.create_blend_ba_texture(textures, resolution)
+            ba_image = HZ_OT_PackTextures.create_blend_ba_texture(textures, resolution)
             ba_path = os.path.join(output_dir, f"{safe_name}_BA.png")
 
             ba_image.filepath_raw = ba_path
@@ -565,7 +678,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             print(f"  ✓ Saved: {safe_name}_BA.png (Masked material)")
         # Handle _UIO material: BA with RGB=BaseColor, A=Alpha (high-quality UI texture)
         elif is_uio_material:
-            ba_image = self.create_blend_ba_texture(textures, resolution)
+            ba_image = HZ_OT_PackTextures.create_blend_ba_texture(textures, resolution)
             ba_path = os.path.join(output_dir, f"{safe_name}_BA.png")
 
             ba_image.filepath_raw = ba_path
@@ -576,7 +689,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             print(f"  ✓ Saved: {safe_name}_BA.png (UIO material)")
         else:
             # Standard material: Always create BR, optionally create MEO if metallic/emission/AO present
-            br_image = self.create_br_texture(textures, resolution)
+            br_image = HZ_OT_PackTextures.create_br_texture(textures, resolution)
             br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
 
             # Save BR texture
@@ -591,7 +704,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
             if has_meo_data:
                 # Create MEO texture (R=Metallic, G=Emission, B=AO)
-                meo_image = self.create_meo_texture(textures, resolution)
+                meo_image = HZ_OT_PackTextures.create_meo_texture(textures, resolution)
                 meo_path = os.path.join(output_dir, f"{safe_name}_MEO.png")
 
                 meo_image.filepath_raw = meo_path
@@ -611,105 +724,9 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                 print(f"  ✓ Saved: {safe_name}_BR.png")
 
         return True
-    
-    def get_texture_from_socket(self, socket):
-        """Get the image texture connected to a socket, tracing through intermediate nodes"""
-        if not socket.is_linked:
-            return None
 
-        # Trace back through the node chain to find an Image Texture
-        nodes_to_check = [socket.links[0].from_node]
-        visited = set()
-
-        while nodes_to_check:
-            node = nodes_to_check.pop(0)
-
-            if node in visited:
-                continue
-            visited.add(node)
-
-            # Found an image texture node
-            if node.type == 'TEX_IMAGE' and node.image:
-                return node.image
-
-            # For other node types, check their inputs
-            if hasattr(node, 'inputs'):
-                for input_socket in node.inputs:
-                    if input_socket.is_linked:
-                        nodes_to_check.append(input_socket.links[0].from_node)
-
-        return None
-    
-    def get_resolution(self, textures, default_res):
-        """Determine resolution from existing textures or use default"""
-        for tex in textures.values():
-            if tex:
-                return (tex.size[0], tex.size[1])
-        return (default_res, default_res)
-    
-    def get_pixel_data(self, image, resolution):
-        """Get pixel data from Blender image and resize if needed"""
-        if not image:
-            return None
-
-        # If image needs resizing, create a temporary resized copy
-        width, height = image.size[0], image.size[1]
-        if (width, height) != resolution:
-            # Create a temporary image at target resolution
-            temp_img = bpy.data.images.new(
-                name="temp_resize",
-                width=resolution[0],
-                height=resolution[1],
-                alpha=True
-            )
-
-            # Scale the source image to temp image using Blender's scale
-            temp_img.scale(resolution[0], resolution[1])
-
-            # Copy pixels from source with scaling
-            src_pixels = list(image.pixels)
-            temp_pixels = [0.0] * (resolution[0] * resolution[1] * 4)
-
-            # Simple bilinear interpolation for resizing
-            for y in range(resolution[1]):
-                for x in range(resolution[0]):
-                    # Map to source coordinates
-                    src_x = (x / resolution[0]) * width
-                    src_y = (y / resolution[1]) * height
-
-                    # Get integer coordinates
-                    x0 = int(src_x)
-                    y0 = int(src_y)
-                    x1 = min(x0 + 1, width - 1)
-                    y1 = min(y0 + 1, height - 1)
-
-                    # Get fractional parts
-                    fx = src_x - x0
-                    fy = src_y - y0
-
-                    # Sample 4 pixels for bilinear interpolation
-                    for c in range(min(image.channels, 4)):
-                        p00 = src_pixels[(y0 * width + x0) * image.channels + c] if c < image.channels else 1.0
-                        p10 = src_pixels[(y0 * width + x1) * image.channels + c] if c < image.channels else 1.0
-                        p01 = src_pixels[(y1 * width + x0) * image.channels + c] if c < image.channels else 1.0
-                        p11 = src_pixels[(y1 * width + x1) * image.channels + c] if c < image.channels else 1.0
-
-                        # Bilinear interpolation
-                        p0 = p00 * (1 - fx) + p10 * fx
-                        p1 = p01 * (1 - fx) + p11 * fx
-                        value = p0 * (1 - fy) + p1 * fy
-
-                        temp_pixels[(y * resolution[0] + x) * 4 + c] = value
-
-                    # Fill alpha if source doesn't have it
-                    if image.channels < 4:
-                        temp_pixels[(y * resolution[0] + x) * 4 + 3] = 1.0
-
-            return temp_pixels, 4
-        else:
-            return list(image.pixels), image.channels
-    
-    def create_br_texture(self, textures, resolution):
+    @staticmethod
+    def create_br_texture(textures, resolution):
         """Create BR texture: RGB = Base Color, A = Roughness"""
         width, height = resolution
 
@@ -727,12 +744,12 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         # Load base color
         base_color_data = None
         if textures['base_color']:
-            base_color_data, channels = self.get_pixel_data(textures['base_color'], resolution)
+            base_color_data, channels = get_pixel_data(textures['base_color'], resolution)
 
         # Load roughness
         roughness_data = None
         if textures['roughness']:
-            roughness_data, channels = self.get_pixel_data(textures['roughness'], resolution)
+            roughness_data, channels = get_pixel_data(textures['roughness'], resolution)
 
         # Fill pixel data
         for y in range(height):
@@ -766,7 +783,8 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         return br_image
 
-    def create_metal_br_texture(self, textures, resolution):
+    @staticmethod
+    def create_metal_br_texture(textures, resolution):
         """Create Metal BR texture: RGB = Base Color, A = Metallic"""
         width, height = resolution
 
@@ -784,12 +802,12 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         # Load base color
         base_color_data = None
         if textures['base_color']:
-            base_color_data, channels = self.get_pixel_data(textures['base_color'], resolution)
+            base_color_data, channels = get_pixel_data(textures['base_color'], resolution)
 
         # Load metallic
         metallic_data = None
         if textures['metallic']:
-            metallic_data, channels = self.get_pixel_data(textures['metallic'], resolution)
+            metallic_data, channels = get_pixel_data(textures['metallic'], resolution)
 
         # Fill pixel data
         for y in range(height):
@@ -820,7 +838,8 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         return br_image
 
-    def create_blend_ba_texture(self, textures, resolution):
+    @staticmethod
+    def create_blend_ba_texture(textures, resolution):
         """Create Blend BA texture: RGB = Base Color, A = Alpha"""
         width, height = resolution
 
@@ -839,7 +858,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         base_color_data = None
         base_color_channels = 0
         if textures['base_color']:
-            base_color_data, base_color_channels = self.get_pixel_data(textures['base_color'], resolution)
+            base_color_data, base_color_channels = get_pixel_data(textures['base_color'], resolution)
 
         # Fill pixel data
         for y in range(height):
@@ -871,7 +890,8 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         return ba_image
 
-    def create_transparent_mesa_texture(self, textures, resolution):
+    @staticmethod
+    def create_transparent_mesa_texture(textures, resolution):
         """Create Transparent MESA texture: R = Metallic, G = Specular, B = Emission, A = Alpha"""
         width, height = resolution
 
@@ -889,23 +909,23 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         # Load metallic
         metallic_data = None
         if textures['metallic']:
-            metallic_data, _ = self.get_pixel_data(textures['metallic'], resolution)
+            metallic_data, _ = get_pixel_data(textures['metallic'], resolution)
 
         # Load specular
         specular_data = None
         if textures['specular']:
-            specular_data, _ = self.get_pixel_data(textures['specular'], resolution)
+            specular_data, _ = get_pixel_data(textures['specular'], resolution)
 
         # Load emission
         emission_data = None
         if textures['emission']:
-            emission_data, _ = self.get_pixel_data(textures['emission'], resolution)
+            emission_data, _ = get_pixel_data(textures['emission'], resolution)
 
         # Load base color for alpha channel
         base_color_data = None
         base_color_channels = 0
         if textures['base_color']:
-            base_color_data, base_color_channels = self.get_pixel_data(textures['base_color'], resolution)
+            base_color_data, base_color_channels = get_pixel_data(textures['base_color'], resolution)
 
         # Debug: Check what data we have
         print(f"  Debug - metallic_data: {metallic_data is not None}, specular_data: {specular_data is not None}, emission_data: {emission_data is not None}, base_color_channels: {base_color_channels}")
@@ -957,7 +977,8 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         return mesa_image
 
-    def create_meo_texture(self, textures, resolution):
+    @staticmethod
+    def create_meo_texture(textures, resolution):
         """Create MEO texture: R = Metallic, G = Emission, B = AO"""
         width, height = resolution
 
@@ -975,17 +996,17 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         # Load metallic
         metallic_data = None
         if textures['metallic']:
-            metallic_data, _ = self.get_pixel_data(textures['metallic'], resolution)
+            metallic_data, _ = get_pixel_data(textures['metallic'], resolution)
 
         # Load emission
         emission_data = None
         if textures['emission']:
-            emission_data, _ = self.get_pixel_data(textures['emission'], resolution)
+            emission_data, _ = get_pixel_data(textures['emission'], resolution)
 
         # Load AO
         ao_data = None
         if textures['ao']:
-            ao_data, _ = self.get_pixel_data(textures['ao'], resolution)
+            ao_data, _ = get_pixel_data(textures['ao'], resolution)
 
         # Debug: Check what data we have
         print(f"  Debug - metallic_data: {metallic_data is not None}, emission_data: {emission_data is not None}, ao_data: {ao_data is not None}")
@@ -1046,8 +1067,9 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                   f"G={check_pixels[sample_idx+1]:.3f}, B={check_pixels[sample_idx+2]:.3f}")
 
         return meo_image
-    
-    def bake_ao(self, context, material, resolution):
+
+    @staticmethod
+    def bake_ao(context, material, resolution):
         """Bake ambient occlusion for a material"""
         # Find objects using this material
         objects = [obj for obj in context.selected_objects
@@ -1137,7 +1159,8 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         return bake_image
 
-    def bake_emission(self, context, material, resolution):
+    @staticmethod
+    def bake_emission(context, material, resolution):
         """Bake emission for a material"""
         # Find objects using this material
         objects = [obj for obj in context.selected_objects
@@ -1195,7 +1218,8 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         return bake_image
 
-    def bake_material_combined(self, context, material, resolution):
+    @staticmethod
+    def bake_material_combined(context, material, resolution):
         """Bake the entire material appearance (for custom shaders without Principled BSDF)"""
         # Find objects using this material
         objects = [obj for obj in context.selected_objects
@@ -1293,13 +1317,6 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         return bake_image
 
-    def sanitize_filename(self, name):
-        """Remove invalid characters from filename"""
-        invalid_chars = '<>:"/\\|?*'
-        for char in invalid_chars:
-            name = name.replace(char, '_')
-        return name
-
 
 class HZ_OT_PackAllCombined(bpy.types.Operator):
     """Pack all meshes and their materials into a single export"""
@@ -1371,12 +1388,11 @@ class HZ_OT_PackAllCombined(bpy.types.Operator):
         print("="*60)
 
         processed_count = 0
-        pack_operator = HZ_OT_PackTextures()
         for idx, mat in enumerate(materials):
             wm.progress_update(idx)
             print(f"\n[{idx + 1}/{len(materials)}] Processing: {mat.name}")
 
-            success = pack_operator.process_material(mat, output_dir, context)
+            success = HZ_OT_PackTextures.process_material(self, mat, output_dir, context)
             if success:
                 processed_count += 1
 
@@ -1450,7 +1466,6 @@ class HZ_OT_PackAllSeparate(bpy.types.Operator):
         wm = context.window_manager
         wm.progress_begin(0, len(all_meshes))
 
-        pack_operator = HZ_OT_PackTextures()
         total_materials_processed = 0
         total_meshes_exported = 0
 
@@ -1462,7 +1477,7 @@ class HZ_OT_PackAllSeparate(bpy.types.Operator):
             print(f"{'='*60}")
 
             # Create subdirectory for this mesh
-            safe_mesh_name = pack_operator.sanitize_filename(obj.name)
+            safe_mesh_name = sanitize_filename(obj.name)
             mesh_output_dir = os.path.join(output_dir, safe_mesh_name)
             os.makedirs(mesh_output_dir, exist_ok=True)
 
@@ -1493,7 +1508,7 @@ class HZ_OT_PackAllSeparate(bpy.types.Operator):
                 for mat_idx, mat in enumerate(materials):
                     print(f"\n  [{mat_idx + 1}/{len(materials)}] Processing material: {mat.name}")
 
-                    success = pack_operator.process_material(mat, mesh_output_dir, context)
+                    success = HZ_OT_PackTextures.process_material(self, mat, mesh_output_dir, context)
                     if success:
                         processed_count += 1
 
