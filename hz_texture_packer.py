@@ -189,14 +189,14 @@ class HZ_OT_PackTextures(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.hz_texture_packer
         output_dir = bpy.path.abspath(props.output_path)
-        
+
         if not output_dir:
             self.report({'ERROR'}, "Please set an output directory")
             return {'CANCELLED'}
-        
+
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # Get all materials from selected objects
         materials = set()
         for obj in context.selected_objects:
@@ -204,16 +204,65 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                 for mat in obj.data.materials:
                     if mat and mat.use_nodes:
                         materials.add(mat)
-        
+
         if not materials:
             self.report({'WARNING'}, "No materials found on selected meshes")
             return {'CANCELLED'}
-        
-        processed_count = 0
+
+        # Check for invalid material names
+        invalid_materials = []
         for mat in materials:
+            is_valid, reason = validate_material_name(mat.name)
+            if not is_valid:
+                invalid_materials.append((mat.name, reason))
+
+        if invalid_materials:
+            # Show warning but allow them to proceed
+            warning_msg = f"Warning: {len(invalid_materials)} material(s) have invalid names:\n"
+            for mat_name, reason in invalid_materials[:3]:  # Show first 3
+                warning_msg += f"  • {mat_name}: {reason}\n"
+            if len(invalid_materials) > 3:
+                warning_msg += f"  ... and {len(invalid_materials) - 3} more\n"
+            warning_msg += "Run 'Validate Material Names' to fix these issues."
+            self.report({'WARNING'}, warning_msg)
+            print("\n" + "="*60)
+            print("MATERIAL NAME VALIDATION WARNING")
+            print("="*60)
+            for mat_name, reason in invalid_materials:
+                print(f"  ✗ {mat_name}")
+                print(f"    Reason: {reason}")
+            print("="*60)
+            print("TIP: Use 'Validate Material Names' button to auto-fix these issues")
+            print("="*60 + "\n")
+
+        # Initialize progress bar
+        wm = context.window_manager
+        wm.progress_begin(0, len(materials))
+
+        print("\n" + "="*60)
+        print(f"STARTING TEXTURE PACKING FOR {len(materials)} MATERIAL(S)")
+        print("="*60)
+
+        processed_count = 0
+        for idx, mat in enumerate(materials):
+            # Update progress bar with current material
+            wm.progress_update(idx)
+            print(f"\n[{idx + 1}/{len(materials)}] Processing: {mat.name}")
+
             success = self.process_material(mat, output_dir, context)
             if success:
                 processed_count += 1
+
+        # End progress bar
+        wm.progress_end()
+
+        # Print summary
+        print("\n" + "="*60)
+        print(f"TEXTURE PACKING COMPLETE")
+        print(f"  Materials processed: {processed_count}/{len(materials)}")
+        if processed_count < len(materials):
+            print(f"  Materials skipped: {len(materials) - processed_count}")
+        print("="*60)
 
         # Export selected meshes to FBX
         selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
@@ -229,6 +278,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
             # Export FBX with selected objects only
             try:
+                print(f"\nExporting {len(selected_meshes)} mesh(es) to FBX...")
                 bpy.ops.export_scene.fbx(
                     filepath=fbx_path,
                     use_selection=True,
@@ -237,10 +287,10 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                     add_leaf_bones=False,
                     bake_anim=False
                 )
-                print(f"Exported FBX to: {fbx_path}")
+                print(f"✓ Exported FBX to: {fbx_path}")
                 self.report({'INFO'}, f"Processed {processed_count} materials and exported {len(selected_meshes)} mesh(es)")
             except Exception as e:
-                print(f"Error exporting FBX: {e}")
+                print(f"✗ Error exporting FBX: {e}")
                 self.report({'WARNING'}, f"Processed {processed_count} materials but FBX export failed: {e}")
         else:
             self.report({'INFO'}, f"Processed {processed_count} materials")
@@ -269,6 +319,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                 break
 
         if not principled:
+            print(f"  ✗ Skipped: No Principled BSDF node found")
             self.report({'WARNING'}, f"Material '{mat.name}' has no Principled BSDF")
             return False
 
@@ -283,29 +334,33 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         }
 
         # Debug output
-        print(f"\nProcessing material: {mat.name}")
+        print(f"  Material Type: ", end="")
         if is_vxc_material:
-            print(f"  Detected _VXC suffix - pure vertex color material (no texture export needed)")
+            print(f"_VXC (vertex color only - no texture export needed)")
             return True  # Successfully processed, but no export needed
         elif is_metal_material:
-            print(f"  Detected _Metal suffix - will export BR with metallic in alpha")
+            print(f"_Metal → will export BR (RGB=BaseColor, A=Metallic)")
         elif is_blend_material:
-            print(f"  Detected _Blend suffix - will export BA with base color RGB and alpha")
+            print(f"_Blend → will export BA (RGB=BaseColor, A=Alpha)")
         elif is_transparent_material:
-            print(f"  Detected _Transparent suffix - will export BR and MESA")
+            print(f"_Transparent → will export BR + MESA")
         elif is_vxm_material:
-            print(f"  Detected _VXM suffix - will export BR with base color RGB and roughness alpha (vertex color multiplied in Horizon)")
+            print(f"_VXM (vertex multiplied) → will export BR + MEO*")
         elif is_maskedvxm_material:
-            print(f"  Detected _MaskedVXM suffix - will export BA with base color RGB and alpha (vertex color multiplied in Horizon)")
+            print(f"_MaskedVXM → will export BA (RGB=BaseColor, A=Alpha)")
         elif is_masked_material:
-            print(f"  Detected _Masked suffix - will export BA with base color RGB and alpha")
+            print(f"_Masked → will export BA (RGB=BaseColor, A=Alpha)")
         elif is_uio_material:
-            print(f"  Detected _UIO suffix - will export high-quality BA for UI with base color RGB and alpha")
+            print(f"_UIO (UI optimized) → will export BA")
+        else:
+            print(f"Standard → will export BR + MEO*")
+
+        print(f"  Textures found:")
         for key, tex in textures.items():
             if tex:
-                print(f"  {key}: {tex.name} ({tex.size[0]}x{tex.size[1]})")
+                print(f"    ✓ {key}: {tex.name} ({tex.size[0]}x{tex.size[1]})")
             else:
-                print(f"  {key}: None")
+                print(f"    ✗ {key}: None")
 
         # Try to find AO texture from other nodes (common setup)
         # _Transparent, _Masked, _MaskedVXM, and _UIO materials don't need AO (not in their output formats)
@@ -316,17 +371,21 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                     img_name = node.image.name.lower()
                     if 'ao' in img_name or 'occlusion' in img_name or 'ambient' in img_name:
                         textures['ao'] = node.image
-                        print(f"  Found AO texture by name search: {node.image.name}")
+                        print(f"    ✓ Found AO by name: {node.image.name}")
                         break
 
             # Auto-bake if enabled
             if props.auto_bake_ao and not textures['ao']:
-                print(f"  Auto-baking AO for {mat.name}...")
+                print(f"  ⏳ Auto-baking AO (this may take a moment)...")
                 textures['ao'] = self.bake_ao(context, mat, props.bake_resolution)
+                if textures['ao']:
+                    print(f"  ✓ AO bake complete")
 
             if props.auto_bake_emission and not textures['emission']:
-                print(f"  Auto-baking Emission for {mat.name}...")
+                print(f"  ⏳ Auto-baking Emission (this may take a moment)...")
                 textures['emission'] = self.bake_emission(context, mat, props.bake_resolution)
+                if textures['emission']:
+                    print(f"  ✓ Emission bake complete")
 
         # Determine resolution
         resolution = self.get_resolution(textures, props.default_resolution)
@@ -373,7 +432,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             br_image.save()
 
             bpy.data.images.remove(br_image)
-            print(f"Saved {safe_name}_BR.png (Metal material)")
+            print(f"  ✓ Saved: {safe_name}_BR.png (Metal material)")
         # Handle _Blend material: BA with RGB=BaseColor, A=Alpha
         elif is_blend_material:
             ba_image = self.create_blend_ba_texture(textures, resolution)
@@ -384,7 +443,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             ba_image.save()
 
             bpy.data.images.remove(ba_image)
-            print(f"Saved {safe_name}_BA.png (Blend material)")
+            print(f"  ✓ Saved: {safe_name}_BA.png (Blend material)")
         # Handle _Transparent material: BR (RGB=BaseColor, A=Roughness) and MESA (R=Metallic, G=Specular, B=Emission, A=Alpha)
         elif is_transparent_material:
             # Create BR texture (standard base color + roughness)
@@ -406,7 +465,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             mesa_image.save()
 
             bpy.data.images.remove(mesa_image)
-            print(f"Saved {safe_name}_BR.png and {safe_name}_MESA.png (Transparent material)")
+            print(f"  ✓ Saved: {safe_name}_BR.png and {safe_name}_MESA.png (Transparent material)")
         # Handle _VXM material: BR with RGB=BaseColor, A=Roughness (vertex color multiplied in Horizon)
         # Optionally also export MEO if metallic, emission, or AO data is present
         elif is_vxm_material:
@@ -440,9 +499,9 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                         print(f"  Cleaning up baked image: {textures[key].name}")
                         bpy.data.images.remove(textures[key])
 
-                print(f"Saved {safe_name}_BR.png and {safe_name}_MEO.png (VXM material - vertex color multiplied in Horizon)")
+                print(f"  ✓ Saved: {safe_name}_BR.png and {safe_name}_MEO.png (VXM material)")
             else:
-                print(f"Saved {safe_name}_BR.png (VXM material - vertex color multiplied in Horizon)")
+                print(f"  ✓ Saved: {safe_name}_BR.png (VXM material)")
         # Handle _MaskedVXM material: BA with RGB=BaseColor, A=Alpha (same as _Blend, vertex color multiplied in Horizon)
         elif is_maskedvxm_material:
             ba_image = self.create_blend_ba_texture(textures, resolution)
@@ -453,7 +512,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             ba_image.save()
 
             bpy.data.images.remove(ba_image)
-            print(f"Saved {safe_name}_BA.png (MaskedVXM material - vertex color multiplied in Horizon)")
+            print(f"  ✓ Saved: {safe_name}_BA.png (MaskedVXM material)")
         # Handle _Masked material: BA with RGB=BaseColor, A=Alpha (same as _Blend)
         elif is_masked_material:
             ba_image = self.create_blend_ba_texture(textures, resolution)
@@ -464,7 +523,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             ba_image.save()
 
             bpy.data.images.remove(ba_image)
-            print(f"Saved {safe_name}_BA.png (Masked material)")
+            print(f"  ✓ Saved: {safe_name}_BA.png (Masked material)")
         # Handle _UIO material: BA with RGB=BaseColor, A=Alpha (high-quality UI texture)
         elif is_uio_material:
             ba_image = self.create_blend_ba_texture(textures, resolution)
@@ -475,7 +534,7 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             ba_image.save()
 
             bpy.data.images.remove(ba_image)
-            print(f"Saved {safe_name}_BA.png (UIO material - high-quality UI texture)")
+            print(f"  ✓ Saved: {safe_name}_BA.png (UIO material)")
         else:
             # Standard material: Always create BR, optionally create MEO if metallic/emission/AO present
             br_image = self.create_br_texture(textures, resolution)
@@ -508,9 +567,9 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                         print(f"  Cleaning up baked image: {textures[key].name}")
                         bpy.data.images.remove(textures[key])
 
-                print(f"Saved {safe_name}_BR.png and {safe_name}_MEO.png")
+                print(f"  ✓ Saved: {safe_name}_BR.png and {safe_name}_MEO.png")
             else:
-                print(f"Saved {safe_name}_BR.png")
+                print(f"  ✓ Saved: {safe_name}_BR.png")
 
         return True
     
@@ -1002,9 +1061,8 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         try:
             # Bake AO
-            print(f"  Running AO bake with {context.scene.cycles.samples} samples...")
+            print(f"    Baking with {context.scene.cycles.samples} samples at {res}x{res}...")
             bpy.ops.object.bake(type='AO')
-            print(f"  Successfully baked AO texture")
 
             # Debug: Check if image has any variation
             pixels = list(bake_image.pixels)
@@ -1012,15 +1070,19 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                 min_val = min(pixels)
                 max_val = max(pixels)
                 avg_val = sum(pixels) / len(pixels)
-                print(f"  AO Bake stats - Min: {min_val:.3f}, Max: {max_val:.3f}, Avg: {avg_val:.3f}")
+                print(f"    Range: {min_val:.2f} - {max_val:.2f}, Avg: {avg_val:.2f}")
 
         except Exception as e:
             print(f"  Error baking AO: {e}")
             bpy.data.images.remove(bake_image)
-            nodes.remove(temp_node)
             context.scene.render.engine = original_engine
             context.view_layer.objects.active = original_active
             context.scene.cycles.samples = original_samples
+            # Remove temp node
+            try:
+                nodes.remove(temp_node)
+            except:
+                pass  # Node may already be removed
             return None
         finally:
             # Restore settings
@@ -1028,8 +1090,11 @@ class HZ_OT_PackTextures(bpy.types.Operator):
             context.view_layer.objects.active = original_active
             context.scene.cycles.samples = original_samples
 
-            # Remove temp node
-            nodes.remove(temp_node)
+            # Remove temp node if it still exists
+            try:
+                nodes.remove(temp_node)
+            except:
+                pass  # Node may already be removed or invalid
 
         return bake_image
 
@@ -1067,20 +1132,27 @@ class HZ_OT_PackTextures(bpy.types.Operator):
 
         try:
             # Bake
+            print(f"    Baking at {res}x{res}...")
             bpy.ops.object.bake(type='EMIT')
-            print(f"  Successfully baked Emission texture")
         except Exception as e:
             print(f"  Error baking Emission: {e}")
             bpy.data.images.remove(bake_image)
-            nodes.remove(temp_node)
             context.scene.render.engine = original_engine
+            # Remove temp node
+            try:
+                nodes.remove(temp_node)
+            except:
+                pass  # Node may already be removed
             return None
         finally:
             # Restore settings
             context.scene.render.engine = original_engine
 
-            # Remove temp node
-            nodes.remove(temp_node)
+            # Remove temp node if it still exists
+            try:
+                nodes.remove(temp_node)
+            except:
+                pass  # Node may already be removed or invalid
 
         return bake_image
 
