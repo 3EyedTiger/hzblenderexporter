@@ -4,7 +4,7 @@ bl_info = {
     "version": (1, 11, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Horizon Tools",
-    "description": "Pack PBR textures into Horizon Worlds-optimized BR and MEO format",
+    "description": "Bake and Pack Materials into Horizon Compatible Imports",
     "category": "Material",
 }
 
@@ -181,7 +181,7 @@ class HZ_OT_ValidateMaterialNames(bpy.types.Operator):
 
 
 class HZ_OT_PackTextures(bpy.types.Operator):
-    """Pack PBR textures and export selected meshes"""
+    """Bake & Pack Textures and Meshes into importable assets for Meta Horizon Worlds"""
     bl_idname = "hz.pack_textures"
     bl_label = "Pack Selected"
     bl_options = {'REGISTER', 'UNDO'}
