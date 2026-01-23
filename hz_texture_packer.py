@@ -1301,6 +1301,243 @@ class HZ_OT_PackTextures(bpy.types.Operator):
         return name
 
 
+class HZ_OT_PackAllCombined(bpy.types.Operator):
+    """Pack all meshes and their materials into a single export"""
+    bl_idname = "hz.pack_all_combined"
+    bl_label = "Pack All (Combined)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.hz_texture_packer
+        output_dir = bpy.path.abspath(props.output_path)
+
+        if not output_dir:
+            self.report({'ERROR'}, "Please set an output directory")
+            return {'CANCELLED'}
+
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get all mesh objects in the scene
+        all_meshes = [obj for obj in bpy.data.objects if obj.type == 'MESH']
+
+        if not all_meshes:
+            self.report({'WARNING'}, "No mesh objects found in scene")
+            return {'CANCELLED'}
+
+        # Get all materials from all meshes
+        materials = set()
+        for obj in all_meshes:
+            if obj.data.materials:
+                for mat in obj.data.materials:
+                    if mat and mat.use_nodes:
+                        materials.add(mat)
+
+        if not materials:
+            self.report({'WARNING'}, "No materials found on any meshes")
+            return {'CANCELLED'}
+
+        # Check for invalid material names
+        invalid_materials = []
+        for mat in materials:
+            is_valid, reason = validate_material_name(mat.name)
+            if not is_valid:
+                invalid_materials.append((mat.name, reason))
+
+        if invalid_materials:
+            warning_msg = f"Warning: {len(invalid_materials)} material(s) have invalid names:\n"
+            for mat_name, reason in invalid_materials[:3]:
+                warning_msg += f"  • {mat_name}: {reason}\n"
+            if len(invalid_materials) > 3:
+                warning_msg += f"  ... and {len(invalid_materials) - 3} more\n"
+            warning_msg += "Run 'Validate Material Names' to fix these issues."
+            self.report({'WARNING'}, warning_msg)
+            print("\n" + "="*60)
+            print("MATERIAL NAME VALIDATION WARNING")
+            print("="*60)
+            for mat_name, reason in invalid_materials:
+                print(f"  ✗ {mat_name}")
+                print(f"    Reason: {reason}")
+            print("="*60)
+            print("TIP: Use 'Validate Material Names' button to auto-fix these issues")
+            print("="*60 + "\n")
+
+        # Initialize progress bar
+        wm = context.window_manager
+        wm.progress_begin(0, len(materials))
+
+        print("\n" + "="*60)
+        print(f"PACK ALL (COMBINED) - {len(all_meshes)} MESH(ES), {len(materials)} MATERIAL(S)")
+        print("="*60)
+
+        processed_count = 0
+        pack_operator = HZ_OT_PackTextures()
+        for idx, mat in enumerate(materials):
+            wm.progress_update(idx)
+            print(f"\n[{idx + 1}/{len(materials)}] Processing: {mat.name}")
+
+            success = pack_operator.process_material(mat, output_dir, context)
+            if success:
+                processed_count += 1
+
+        wm.progress_end()
+
+        # Print summary
+        print("\n" + "="*60)
+        print(f"TEXTURE PACKING COMPLETE")
+        print(f"  Materials processed: {processed_count}/{len(materials)}")
+        if processed_count < len(materials):
+            print(f"  Materials skipped: {len(materials) - processed_count}")
+        print("="*60)
+
+        # Export all meshes to single FBX
+        if all_meshes:
+            fbx_name = "all_meshes_combined.fbx"
+            fbx_path = os.path.join(output_dir, fbx_name)
+
+            try:
+                print(f"\nExporting {len(all_meshes)} mesh(es) to combined FBX...")
+                # Select all meshes
+                bpy.ops.object.select_all(action='DESELECT')
+                for obj in all_meshes:
+                    obj.select_set(True)
+
+                bpy.ops.export_scene.fbx(
+                    filepath=fbx_path,
+                    use_selection=True,
+                    object_types={'MESH'},
+                    use_mesh_modifiers=True,
+                    add_leaf_bones=False,
+                    bake_anim=False
+                )
+                print(f"✓ Exported FBX to: {fbx_path}")
+                self.report({'INFO'}, f"Processed {processed_count} materials and exported {len(all_meshes)} mesh(es)")
+            except Exception as e:
+                print(f"✗ Error exporting FBX: {e}")
+                self.report({'WARNING'}, f"Processed {processed_count} materials but FBX export failed: {e}")
+        else:
+            self.report({'INFO'}, f"Processed {processed_count} materials")
+
+        return {'FINISHED'}
+
+
+class HZ_OT_PackAllSeparate(bpy.types.Operator):
+    """Pack each mesh separately into its own subdirectory"""
+    bl_idname = "hz.pack_all_separate"
+    bl_label = "Pack All (Separate)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.hz_texture_packer
+        output_dir = bpy.path.abspath(props.output_path)
+
+        if not output_dir:
+            self.report({'ERROR'}, "Please set an output directory")
+            return {'CANCELLED'}
+
+        # Get all mesh objects
+        all_meshes = [obj for obj in bpy.data.objects if obj.type == 'MESH']
+
+        if not all_meshes:
+            self.report({'WARNING'}, "No mesh objects found in scene")
+            return {'CANCELLED'}
+
+        print("\n" + "="*60)
+        print(f"PACK ALL (SEPARATE) - Processing {len(all_meshes)} mesh(es)")
+        print("="*60)
+
+        # Initialize progress
+        wm = context.window_manager
+        wm.progress_begin(0, len(all_meshes))
+
+        pack_operator = HZ_OT_PackTextures()
+        total_materials_processed = 0
+        total_meshes_exported = 0
+
+        for mesh_idx, obj in enumerate(all_meshes):
+            wm.progress_update(mesh_idx)
+
+            print(f"\n{'='*60}")
+            print(f"[{mesh_idx + 1}/{len(all_meshes)}] MESH: {obj.name}")
+            print(f"{'='*60}")
+
+            # Create subdirectory for this mesh
+            safe_mesh_name = pack_operator.sanitize_filename(obj.name)
+            mesh_output_dir = os.path.join(output_dir, safe_mesh_name)
+            os.makedirs(mesh_output_dir, exist_ok=True)
+
+            # Get materials from this mesh only
+            materials = set()
+            if obj.data.materials:
+                for mat in obj.data.materials:
+                    if mat and mat.use_nodes:
+                        materials.add(mat)
+
+            if materials:
+                print(f"  Processing {len(materials)} material(s) for this mesh")
+
+                # Check for invalid material names
+                invalid_materials = []
+                for mat in materials:
+                    is_valid, reason = validate_material_name(mat.name)
+                    if not is_valid:
+                        invalid_materials.append((mat.name, reason))
+
+                if invalid_materials:
+                    print(f"  ⚠ Warning: {len(invalid_materials)} material(s) have invalid names")
+                    for mat_name, reason in invalid_materials:
+                        print(f"    ✗ {mat_name}: {reason}")
+
+                # Process materials
+                processed_count = 0
+                for mat_idx, mat in enumerate(materials):
+                    print(f"\n  [{mat_idx + 1}/{len(materials)}] Processing material: {mat.name}")
+
+                    success = pack_operator.process_material(mat, mesh_output_dir, context)
+                    if success:
+                        processed_count += 1
+
+                total_materials_processed += processed_count
+                print(f"\n  Materials processed: {processed_count}/{len(materials)}")
+            else:
+                print(f"  No materials found on this mesh")
+
+            # Export this mesh to FBX in its subdirectory
+            fbx_name = f"{safe_mesh_name}.fbx"
+            fbx_path = os.path.join(mesh_output_dir, fbx_name)
+
+            try:
+                print(f"  Exporting mesh to: {fbx_name}")
+                # Select only this mesh
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+
+                bpy.ops.export_scene.fbx(
+                    filepath=fbx_path,
+                    use_selection=True,
+                    object_types={'MESH'},
+                    use_mesh_modifiers=True,
+                    add_leaf_bones=False,
+                    bake_anim=False
+                )
+                print(f"  ✓ Exported to: {safe_mesh_name}/{fbx_name}")
+                total_meshes_exported += 1
+            except Exception as e:
+                print(f"  ✗ Error exporting FBX: {e}")
+
+        wm.progress_end()
+
+        # Print final summary
+        print("\n" + "="*60)
+        print(f"PACK ALL (SEPARATE) COMPLETE")
+        print(f"  Meshes exported: {total_meshes_exported}/{len(all_meshes)}")
+        print(f"  Total materials processed: {total_materials_processed}")
+        print("="*60)
+
+        self.report({'INFO'}, f"Exported {total_meshes_exported} mesh(es) with {total_materials_processed} materials")
+        return {'FINISHED'}
+
+
 class HZ_PT_TexturePackerPanel(bpy.types.Panel):
     """UI Panel for Horizon Worlds Texture Packer"""
     bl_label = "Horizon Worlds Texture Packer"
@@ -1336,9 +1573,24 @@ class HZ_PT_TexturePackerPanel(bpy.types.Panel):
 
         layout.separator()
 
+        # Pack Selected button
         row = layout.row()
         row.scale_y = 2.0
         row.operator("hz.pack_textures", icon='IMAGE_DATA')
+
+        layout.separator()
+
+        # Pack All buttons
+        box = layout.box()
+        box.label(text="Batch Export:", icon='EXPORT')
+
+        row = box.row()
+        row.scale_y = 1.5
+        row.operator("hz.pack_all_combined", icon='PACKAGE')
+
+        row = box.row()
+        row.scale_y = 1.5
+        row.operator("hz.pack_all_separate", icon='COLLECTION_NEW')
 
         layout.separator()
 
@@ -1499,6 +1751,8 @@ classes = (
     HZ_TexturePackerProperties,
     HZ_OT_ValidateMaterialNames,
     HZ_OT_PackTextures,
+    HZ_OT_PackAllCombined,
+    HZ_OT_PackAllSeparate,
     HZ_PT_TexturePackerPanel,
 )
 
