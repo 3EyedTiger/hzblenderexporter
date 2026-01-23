@@ -318,20 +318,59 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                 principled = node
                 break
 
-        if not principled:
-            print(f"  ✗ Skipped: No Principled BSDF node found")
-            self.report({'WARNING'}, f"Material '{mat.name}' has no Principled BSDF")
-            return False
-
-        # Extract texture paths
+        # Initialize textures dictionary
         textures = {
-            'base_color': self.get_texture_from_socket(principled.inputs['Base Color']),
-            'roughness': self.get_texture_from_socket(principled.inputs['Roughness']),
-            'metallic': self.get_texture_from_socket(principled.inputs['Metallic']),
-            'emission': self.get_texture_from_socket(principled.inputs['Emission Color']),
-            'specular': self.get_texture_from_socket(principled.inputs.get('Specular', principled.inputs.get('Specular IOR Level'))),
-            'ao': None  # AO is typically not directly connected to Principled BSDF
+            'base_color': None,
+            'roughness': None,
+            'metallic': None,
+            'emission': None,
+            'specular': None,
+            'ao': None
         }
+
+        if not principled:
+            # Material uses custom shader - try to bake it
+            print(f"  ⚠ No Principled BSDF found - will bake custom shader to texture")
+
+            # Bake the material's appearance
+            baked_texture = self.bake_material_combined(context, mat, props.default_resolution)
+
+            if not baked_texture:
+                print(f"  ✗ Skipped: Could not bake custom shader")
+                self.report({'WARNING'}, f"Material '{mat.name}' has no Principled BSDF and baking failed")
+                return False
+
+            # Use the baked texture as base color for export
+            textures['base_color'] = baked_texture
+            print(f"  ✓ Custom shader baked successfully")
+
+            # For custom shaders, we'll export a simple BR texture with white roughness
+            # since we don't have access to proper PBR channels
+            resolution = (baked_texture.size[0], baked_texture.size[1])
+            safe_name = self.sanitize_filename(mat.name)
+
+            # Create BR texture with baked base color and white roughness
+            br_image = self.create_br_texture(textures, resolution)
+            br_path = os.path.join(output_dir, f"{safe_name}_BR.png")
+
+            br_image.filepath_raw = br_path
+            br_image.file_format = 'PNG'
+            br_image.save()
+
+            bpy.data.images.remove(br_image)
+            # Clean up baked image
+            bpy.data.images.remove(baked_texture)
+
+            print(f"  ✓ Saved: {safe_name}_BR.png (baked from custom shader)")
+            return True
+
+        # Extract texture paths from Principled BSDF
+        textures['base_color'] = self.get_texture_from_socket(principled.inputs['Base Color'])
+        textures['roughness'] = self.get_texture_from_socket(principled.inputs['Roughness'])
+        textures['metallic'] = self.get_texture_from_socket(principled.inputs['Metallic'])
+        textures['emission'] = self.get_texture_from_socket(principled.inputs['Emission Color'])
+        textures['specular'] = self.get_texture_from_socket(principled.inputs.get('Specular', principled.inputs.get('Specular IOR Level')))
+        # textures['ao'] remains None - AO is typically not directly connected to Principled BSDF
 
         # Debug output
         print(f"  Material Type: ", end="")
@@ -1153,6 +1192,104 @@ class HZ_OT_PackTextures(bpy.types.Operator):
                 nodes.remove(temp_node)
             except:
                 pass  # Node may already be removed or invalid
+
+        return bake_image
+
+    def bake_material_combined(self, context, material, resolution):
+        """Bake the entire material appearance (for custom shaders without Principled BSDF)"""
+        # Find objects using this material
+        objects = [obj for obj in context.selected_objects
+                   if obj.type == 'MESH' and material in [slot.material for slot in obj.material_slots]]
+
+        if not objects:
+            print(f"  Warning: No objects found with material {material.name}")
+            return None
+
+        # Use the first object with this material
+        target_obj = objects[0]
+
+        # Check for UV map
+        if not target_obj.data.uv_layers:
+            print(f"  Warning: Object '{target_obj.name}' has no UV map, cannot bake")
+            return None
+
+        print(f"  ⏳ Baking custom shader appearance (this may take a moment)...")
+        print(f"    Using object: {target_obj.name}")
+
+        # Convert resolution to int if it's a string or use directly if it's an int
+        if isinstance(resolution, str):
+            res = int(resolution)
+        else:
+            res = resolution
+
+        # Create a new image for baking
+        bake_image = bpy.data.images.new(
+            name=f"{material.name}_Combined_baked",
+            width=res,
+            height=res,
+            alpha=True
+        )
+
+        # Create a temporary image texture node for baking
+        # For materials without a node tree, we need to handle differently
+        if not material.use_nodes or not material.node_tree:
+            print(f"  Warning: Material has no node tree, cannot bake")
+            bpy.data.images.remove(bake_image)
+            return None
+
+        nodes = material.node_tree.nodes
+        temp_node = nodes.new('ShaderNodeTexImage')
+        temp_node.image = bake_image
+        temp_node.select = True
+        nodes.active = temp_node
+
+        # Store original settings
+        original_engine = context.scene.render.engine
+        original_active = context.view_layer.objects.active
+        original_samples = context.scene.cycles.samples if hasattr(context.scene, 'cycles') else 32
+
+        # Configure for baking
+        context.scene.render.engine = 'CYCLES'
+        context.view_layer.objects.active = target_obj
+        if hasattr(context.scene, 'cycles'):
+            context.scene.cycles.samples = 32  # Reasonable quality
+
+        try:
+            # Bake Combined (full material appearance)
+            print(f"    Baking with {context.scene.cycles.samples if hasattr(context.scene, 'cycles') else 32} samples at {res}x{res}...")
+            bpy.ops.object.bake(type='COMBINED')
+
+            # Debug: Check if image has data
+            pixels = list(bake_image.pixels)
+            if pixels:
+                avg_val = sum(pixels) / len(pixels)
+                print(f"    Average pixel value: {avg_val:.2f}")
+
+        except Exception as e:
+            print(f"  Error baking combined: {e}")
+            bpy.data.images.remove(bake_image)
+            context.scene.render.engine = original_engine
+            context.view_layer.objects.active = original_active
+            if hasattr(context.scene, 'cycles'):
+                context.scene.cycles.samples = original_samples
+            # Remove temp node
+            try:
+                nodes.remove(temp_node)
+            except:
+                pass
+            return None
+        finally:
+            # Restore settings
+            context.scene.render.engine = original_engine
+            context.view_layer.objects.active = original_active
+            if hasattr(context.scene, 'cycles'):
+                context.scene.cycles.samples = original_samples
+
+            # Remove temp node if it still exists
+            try:
+                nodes.remove(temp_node)
+            except:
+                pass
 
         return bake_image
 
