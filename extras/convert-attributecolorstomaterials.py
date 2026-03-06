@@ -10,6 +10,9 @@ sold or bundled into any paid product or service.
 
 The latest version of this script can always be found at:
   https://tinyurl.com/horizonexport
+  
+Instructional video can be found here:
+  https://www.youtube.com/watch?v=3Mj9b_6DxBY
 
 MIT License
 -----------
